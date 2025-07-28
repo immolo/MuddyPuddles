@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -e
+
+CHROOT="$1"
+
+if [ -z "$CHROOT" ]; then
+  echo "Usage: $0 <chroot path>"
+  exit 1
+fi
+
+WORLD_FILE="$CHROOT/var/lib/portage/world"
+PKG_ENV_DIR="$CHROOT/etc/portage/package.env"
+ENV_DIR="$CHROOT/etc/portage/env"
+
+echo ">>> Enabling FEATURES=\"test\" for all world + system packages"
+
+if [ ! -f "$WORLD_FILE" ]; then
+  echo ">>> ERROR: World file not found: $WORLD_FILE"
+  exit 1
+fi
+
+mkdir -p "$ENV_DIR" "$PKG_ENV_DIR"
+
+# Create the test.conf env file
+echo "FEATURES=\"test\"" > "$ENV_DIR/test.conf"
+
+# Wipe old test mappings
+rm -f "$PKG_ENV_DIR/world-test"
+
+# Add @world packages
+echo ">>> Adding world packages..."
+while read -r PKG; do
+  [[ -z "$PKG" ]] && continue
+  echo "$PKG test.conf" >> "$PKG_ENV_DIR/world-test"
+done < "$WORLD_FILE"
+
+# Add @system packages via emerge
+echo ">>> Adding system packages..."
+SYSTEM_PACKAGES=$(arch-chroot "$CHROOT" emerge -epv @system | awk '/^\[ebuild/ {print $4}' | sed -E 's/(-[0-9][^ ]*)?(::[a-zA-Z0-9_-]+)?$//' | sort -u || true)
+
+if [ -z "$SYSTEM_PACKAGES" ]; then
+  echo ">>> ERROR: Could not get system packages (is emerge working in chroot?)"
+  exit 1
+fi
+
+for PKG in $SYSTEM_PACKAGES; do
+  echo "$PKG test.conf" >> "$PKG_ENV_DIR/world-test"
+done
+
+echo ">>> Wrote package.env/world-test:"
+cat "$PKG_ENV_DIR/world-test"
+
+echo ">>> Done! All world + system packages will use FEATURES=\"test\""
+
+# Add recommended USE flags
+USE_FILE="$CHROOT/etc/portage/package.use/test"
+
+echo ">>> Adding recommended USE flags to: $USE_FILE"
+mkdir -p "$(dirname "$USE_FILE")"
+
+cat > "$USE_FILE" <<EOF
+app-misc/pax-utils python
+net-firewall/iptables conntrack nftables
+dev-lang/rust-bin cpu_flags_x86_sse2
+sys-libs/zlib static-libs
+media-libs/harfbuzz icu
+EOF
+
+echo ">>> Wrote USE flags:"
+cat "$USE_FILE"
+
+# Test merge with pretend
+echo ">>> Running emerge -pvuDU @world inside chroot to test USE flags..."
+if ! arch-chroot "$CHROOT" emerge -pve @world; then
+  echo
+  echo ">>> WARNING: emerge reported conflicts."
+  echo ">>> Please check the output and add any missing USE flags to:"
+  echo ">>>   $USE_FILE"
+  echo
+  exit 1
+fi
+
+echo ">>> USE flag test passed with no errors!"
