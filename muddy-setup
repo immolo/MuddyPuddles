@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -e
+
+CHROOT="$1"
+MAKEOPTS_THREADS="$2"
+KEYWORDS="$3"
+QEMU_ARCH=""
+
+# Parse extra args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --qemu)
+      QEMU_ARCH="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$CHROOT" ] || [ -z "$MAKEOPTS_THREADS" ] || [ -z "$KEYWORDS" ]; then
+  echo "Usage: $0 <chroot path> <makeopts threads> <ACCEPT_KEYWORDS> [--qemu <arch>]"
+  exit 1
+fi
+
+MAKE_CONF="$CHROOT/etc/portage/make.conf"
+PKG_KEYWORDS="$CHROOT/etc/portage/package.accept_keywords"
+
+echo ">>> Setting up chroot at: $CHROOT"
+echo ">>> MAKEOPTS: -j$MAKEOPTS_THREADS"
+echo ">>> ACCEPT_KEYWORDS: ~$KEYWORDS"
+
+# ------------------------------------------
+# Adjust make.conf
+# ------------------------------------------
+
+echo ">>> Updating make.conf..."
+sed -i "/^MAKEOPTS/d" "$MAKE_CONF"
+echo "MAKEOPTS=\"-j$MAKEOPTS_THREADS\"" >> "$MAKE_CONF"
+
+sed -i "/^EMERGE_DEFAULT_OPTS/d" "$MAKE_CONF"
+echo "EMERGE_DEFAULT_OPTS=\"--jobs=2\"" >> "$MAKE_CONF"
+
+sed -i "/^ACCEPT_KEYWORDS/d" "$MAKE_CONF"
+echo "ACCEPT_KEYWORDS=\"~$KEYWORDS\"" >> "$MAKE_CONF"
+
+grep -q '^FEATURES=' "$MAKE_CONF" || echo "FEATURES=\"-pid-sandbox -network-sandbox\"" >> "$MAKE_CONF"
+
+echo ">>> make.conf updated."
+
+# ------------------------------------------
+# gcc package.accept_keywords
+# ------------------------------------------
+
+echo ">>> Adding package.accept_keywords for gcc..."
+mkdir -p "$PKG_KEYWORDS"
+echo "<sys-devel/gcc-16.0.9999:16 **" > "$PKG_KEYWORDS/gcc"
+
+# ------------------------------------------
+# Copy resolv.conf
+# ------------------------------------------
+
+echo ">>> Copying resolv.conf for networking..."
+cp -f /etc/resolv.conf "$CHROOT/etc/resolv.conf"
+
+# ------------------------------------------
+# Create /var/db/repos/gentoo for bind mount
+# ------------------------------------------
+
+echo ">>> Ensuring /var/db/repos/gentoo exists..."
+mkdir -p "$CHROOT/var/db/repos/gentoo"
+
+# ------------------------------------------
+# QEMU copy if requested
+# ------------------------------------------
+
+if [ -n "$QEMU_ARCH" ]; then
+  echo ">>> Copying QEMU for arch: $QEMU_ARCH"
+  QEMU_BIN="qemu-$QEMU_ARCH"
+  if [ ! -x "/usr/bin/$QEMU_BIN" ]; then
+    echo ">>> ERROR: /usr/bin/$QEMU_BIN not found! Install app-emulation/qemu-user."
+    exit 1
+  fi
+  cp "/usr/bin/$QEMU_BIN" "$CHROOT/usr/bin/"
+  echo ">>> Copied $QEMU_BIN into chroot."
+fi
+
+echo ">>> Setup complete!"
