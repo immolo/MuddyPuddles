@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+# muddy-verify.sh
+# --------------------------------
+# Quick test for a MuddyPuddles chroot.
+# - test emerge of gcc-16 snapshot
+# - test emerge of nano with new gcc
+#
+# Usage:
+#   ./muddy-verify.sh /var/chroot/your-chroot
+#
+# --------------------------------
+
+set -e
+
+CHROOT="$1"
+
+if [ -z "$CHROOT" ]; then
+  echo "Usage: $0 <chroot path>"
+  exit 1
+fi
+
+LOG="/var/log/muddypuddles-verify-$(basename $CHROOT).log"
+
+echo ">>> Starting verify test for: $CHROOT"
+echo ">>> Logging to: $LOG"
+
+echo ">>> Mounting host portage directory to chroot"
+mount -o bind /var/db/repos/gentoo $CHROOT/var/db/repos/gentoo
+
+{
+  echo "=== Emerging latest gcc-16..."
+  arch-chroot "$CHROOT" emerge -1v sys-devel/gcc
+
+  echo "=== Setting new gcc with gcc-config..."
+  GCC_SLOT=$(arch-chroot "$CHROOT" gcc-config -l | grep '16' | awk '{print $1}' | tr -d '[]' | head -n1)
+  arch-chroot "$CHROOT" gcc-config "$GCC_SLOT"
+  arch-chroot "$CHROOT" env-update
+
+  echo "=== Verifying gcc version..."
+  arch-chroot "$CHROOT" gcc --version
+
+  echo "=== Emerging nano with new gcc..."
+  arch-chroot "$CHROOT" emerge -1v nano
+
+  echo "=== Verify step complete. "
+} | tee "$LOG"
+
+echo ">>> unounting chroot portage directory"
+umount  $CHROOT/var/db/repos/gentoo
+
+echo ">>> All done! Log written to $LOG"
