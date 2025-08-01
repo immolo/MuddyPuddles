@@ -8,8 +8,9 @@ After many years of manually creating a chroot to enable new toolchain versions 
  - Unmask the latest GCC version (Currently hardcoded to GCC-16)
  - Verify the chroot works with a quick toolchain and package test
  - Enable test suites on all packages that support them in @system and @world per chroot need
+ - Send logs via email with quick glance pass or failure
 
-#TODO 
+# TODO 
  - Add more packages to an existing chroot as needed.
  - Finish automation script
  - Send logs via email with quick glance pass or failure
