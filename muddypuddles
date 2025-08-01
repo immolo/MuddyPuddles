@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+CONFIG="/etc/muddypuddles.conf"
+
+# Load config
+CHROOTS_DIR=$(awk -F' *= *' '/^chroots_dir/ {print $2}' "$CONFIG")
+REPO_PATH=$(awk -F' *= *' '/^repo_path/ {print $2}' "$CONFIG")
+LOG_DIR=$(awk -F' *= *' '/^log_dir/ {print $2}' "$CONFIG")
+
+EMAILS_RAW=$(awk -F' *= *' '/^email/ {print $2}' "$CONFIG")
+IFS=',' read -ra EMAILS <<< "$EMAILS_RAW"
+
+MAIL_USER=$(awk -F' *= *' '/^mail_user/ {print $2}' "$CONFIG")
+
+mkdir -p "$LOG_DIR"
+
+# Timestamp for this run
+RUN_DATE=$(date +"%Y-%m-%d_%H-%M-%S")
+
+# Check at least one puddle given
+if [ $# -eq 0 ]; then
+  echo "Usage: $0 puddle1 [puddle2 ...]"
+  exit 1
+fi
+
+# Sync portage tree on host once
+echo "=== Syncing portage tree on host ==="
+if ! emerge --sync; then
+  echo "Host emerge --sync failed. Exiting."
+  exit 1
+fi
+
+# Collect all chroots and puddle concurrency limits
+declare -A PUDDLES
+declare -A MAX_JOBS
+
+for puddle in "$@"; do
+  chroots=$(awk -v p="[$puddle]" '
+    $0 == p {f=1; next}
+    /^\[/ {f=0}
+    f && /^chroots *=/ {sub(/chroots *= */, "", $0); print $0}' "$CONFIG")
+  max_jobs=$(awk -v p="[$puddle]" '
+    $0 == p {f=1; next}
+    /^\[/ {f=0}
+    f && /^max_jobs *=/ {sub(/max_jobs *= */, "", $0); print $0}' "$CONFIG")
+
+  IFS=',' read -ra CHROOT_LIST <<< "$chroots"
+  for c in "${CHROOT_LIST[@]}"; do
+    PUDDLES["$c"]=$puddle
+  done
+  MAX_JOBS["$puddle"]=$max_jobs
+done
+
+# Function to run a single chroot
+run_chroot() {
+  chroot_name=$1
+  puddle_name=${PUDDLES["$chroot_name"]}
+  chroot_path="$CHROOTS_DIR/$chroot_name"
+  log_file="$LOG_DIR/${chroot_name}_${RUN_DATE}.log"
+
+  echo "=== Starting $chroot_name (puddle $puddle_name) ==="
+
+  if [ ! -d "$chroot_path" ]; then
+    echo "Chroot $chroot_name not found at $chroot_path"
+    return 1
+  fi
+
+  if ! mountpoint -q "$chroot_path/var/db/repos/gentoo"; then
+    mount --bind "$REPO_PATH" "$chroot_path/var/db/repos/gentoo"
+  fi
+
+  {
+    echo "=== Updating GCC in $chroot_name ==="
+    arch-chroot "$chroot_path" emerge -1 sys-devel/gcc
+
+    echo "=== Rebuilding @world in $chroot_name ==="
+    arch-chroot "$chroot_path" emerge -e --keep-going @world
+
+    echo "=== Finished $chroot_name ==="
+  } &> "$log_file"
+
+  umount "$chroot_path/var/db/repos/gentoo"
+
+  if grep -q "failed" "$log_file"; then
+    STATUS="FAILED"
+  else
+    STATUS="PASSED"
+  fi
+
+  SUBJECT="MuddyPuddles: $chroot_name $STATUS [$RUN_DATE]"
+  BODY=$(cat "$log_file")
+
+  for EMAIL in "${EMAILS[@]}"; do
+    sudo -H -u "$MAIL_USER" bash -c "echo \"$BODY\" | mailx -s \"$SUBJECT\" \"$EMAIL\""
+  done
+
+  echo "=== $chroot_name $STATUS [$RUN_DATE] ==="
+}
+
+# Puddle workers
+for puddle in "$@"; do
+  puddle_chroots=()
+  for ch in "${!PUDDLES[@]}"; do
+    [ "${PUDDLES[$ch]}" = "$puddle" ] && puddle_chroots+=("$ch")
+  done
+
+  max_jobs=${MAX_JOBS["$puddle"]}
+
+  echo "=== Running puddle $puddle with concurrency $max_jobs ==="
+
+  export -f run_chroot
+  export CHROOTS_DIR REPO_PATH LOG_DIR PUDDLES EMAILS MAIL_USER RUN_DATE
+
+  printf "%s\n" "${puddle_chroots[@]}" | xargs -n1 -P "$max_jobs" -I{} bash -c "run_chroot {}"
+done
